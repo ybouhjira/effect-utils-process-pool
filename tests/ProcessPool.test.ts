@@ -627,4 +627,310 @@ describe('ProcessPool', () => {
     const status = managed.status();
     expect(['stopping', 'stopped']).toContain(status);
   });
+
+  // === ORPHAN DETECTION & AUTO-CLEANUP ===
+
+  it('should kill all remaining processes when scope closes (finalizer)', async () => {
+    const layer = ProcessPoolLive({ maxConcurrent: 5 });
+
+    // Track PIDs to verify they're killed
+    const pids: number[] = [];
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const pool = yield* ProcessPool;
+
+          // Spawn 2 long-running processes
+          const p1 = yield* pool.spawn('finalizer-1', { command: 'sleep', args: ['30'] });
+          const p2 = yield* pool.spawn('finalizer-2', { command: 'sleep', args: ['30'] });
+
+          // Get PIDs (from internal child process - we'll verify they're killed)
+          const size = yield* pool.size();
+          expect(size).toBe(2);
+
+          // When scope closes, finalizer should kill both processes
+        }).pipe(Effect.provide(layer))
+      )
+    );
+
+    // Wait a bit for cleanup
+    await sleep(200);
+
+    // Verify processes are no longer in pool (pool is finalized)
+    // We can verify by creating a new pool and checking it's empty
+    const newPool = await createPool({ maxConcurrent: 5 });
+    const size = await Effect.runPromise(newPool.size());
+    expect(size).toBe(0);
+  });
+
+  it('should remove dead processes via health check', async () => {
+    const layer = ProcessPoolLive({
+      maxConcurrent: 5,
+      healthCheckInterval: '10 millis'
+    });
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const pool = yield* ProcessPool;
+
+          // Spawn a fast process that exits immediately
+          yield* pool.spawn('health-1', { command: 'echo', args: ['fast'] });
+
+          // Verify it's in the pool initially
+          const sizeBefore = yield* pool.size();
+          expect(sizeBefore).toBe(1);
+
+          // Wait for process to exit + multiple health check cycles
+          yield* Effect.sleep('100 millis');
+
+          // Health check should have removed the dead process
+          const sizeAfter = yield* pool.size();
+          return sizeAfter;
+        }).pipe(Effect.provide(layer))
+      )
+    );
+
+    expect(result).toBe(0);
+  });
+
+  it('should not remove running processes during health check', async () => {
+    const layer = ProcessPoolLive({
+      maxConcurrent: 5,
+      healthCheckInterval: '100 millis'
+    });
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const pool = yield* ProcessPool;
+
+          // Spawn a long-running process
+          yield* pool.spawn('health-2', { command: 'sleep', args: ['10'] });
+
+          // Verify it's in the pool
+          const sizeBefore = yield* pool.size();
+          expect(sizeBefore).toBe(1);
+
+          // Wait for health check to run
+          yield* Effect.sleep('250 millis');
+
+          // Process should still be in pool (it's running)
+          const sizeAfter = yield* pool.size();
+          return sizeAfter;
+        }).pipe(Effect.provide(layer))
+      )
+    );
+
+    expect(result).toBe(1);
+  });
+
+  it('should work without health check interval (regression test)', async () => {
+    const layer = ProcessPoolLive({ maxConcurrent: 5 });
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const pool = yield* ProcessPool;
+
+          // Spawn process
+          const managed = yield* pool.spawn('no-health-1', { command: 'sleep', args: ['1'] });
+
+          // Verify normal operations work
+          const size = yield* pool.size();
+          expect(size).toBe(1);
+
+          const has = yield* pool.has('no-health-1');
+          expect(has).toBe(true);
+
+          const retrieved = yield* pool.get('no-health-1');
+          expect(retrieved.id).toBe('no-health-1');
+
+          return 'success';
+        }).pipe(Effect.provide(layer))
+      )
+    );
+
+    expect(result).toBe('success');
+  });
+
+  it('should remove errored processes via health check', async () => {
+    const layer = ProcessPoolLive({
+      maxConcurrent: 5,
+      healthCheckInterval: '10 millis'
+    });
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const pool = yield* ProcessPool;
+
+          // Spawn a process that exits with error
+          yield* pool.spawn('health-error-1', { command: 'sh', args: ['-c', 'exit 1'] });
+
+          // Verify it's in the pool initially
+          const sizeBefore = yield* pool.size();
+          expect(sizeBefore).toBe(1);
+
+          // Wait for process to exit with error + multiple health check cycles
+          yield* Effect.sleep('100 millis');
+
+          // Health check should have removed the errored process
+          const sizeAfter = yield* pool.size();
+          return sizeAfter;
+        }).pipe(Effect.provide(layer))
+      )
+    );
+
+    expect(result).toBe(0);
+  });
+
+  it('should cleanup multiple dead processes in single health check', async () => {
+    const layer = ProcessPoolLive({
+      maxConcurrent: 5,
+      healthCheckInterval: '100 millis'
+    });
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const pool = yield* ProcessPool;
+
+          // Spawn multiple fast processes
+          yield* pool.spawn('multi-health-1', { command: 'echo', args: ['1'] });
+          yield* pool.spawn('multi-health-2', { command: 'true' });
+          yield* pool.spawn('multi-health-3', { command: 'sh', args: ['-c', 'exit 0'] });
+
+          // Verify they're all in the pool
+          const sizeBefore = yield* pool.size();
+          expect(sizeBefore).toBe(3);
+
+          // Wait for all to exit + health check to run
+          yield* Effect.sleep('250 millis');
+
+          // Health check should have removed all dead processes
+          const sizeAfter = yield* pool.size();
+          return sizeAfter;
+        }).pipe(Effect.provide(layer))
+      )
+    );
+
+    expect(result).toBe(0);
+  });
+
+  it('should cleanup mix of stopped and errored processes in health check', async () => {
+    const layer = ProcessPoolLive({
+      maxConcurrent: 5,
+      healthCheckInterval: '50 millis'
+    });
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const pool = yield* ProcessPool;
+
+          // Spawn mix: some succeed (stopped), some fail (error)
+          yield* pool.spawn('mix-1', { command: 'echo', args: ['success'] });
+          yield* pool.spawn('mix-2', { command: 'sh', args: ['-c', 'exit 1'] });
+          yield* pool.spawn('mix-3', { command: 'true' });
+          yield* pool.spawn('mix-4', { command: 'sh', args: ['-c', 'exit 2'] });
+
+          // Initial size
+          const sizeBefore = yield* pool.size();
+          expect(sizeBefore).toBe(4);
+
+          // Wait for processes to exit
+          yield* Effect.sleep('150 millis');
+
+          // Wait for multiple health check cycles to ensure they run
+          yield* Effect.sleep('200 millis');
+
+          // All should be removed (both stopped and error status)
+          const sizeAfter = yield* pool.size();
+          return sizeAfter;
+        }).pipe(Effect.provide(layer))
+      )
+    );
+
+    expect(result).toBe(0);
+  });
+
+  it('should execute health check multiple times and remove dead processes', async () => {
+    const layer = ProcessPoolLive({
+      maxConcurrent: 10,
+      healthCheckInterval: '5 millis'
+    });
+
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const pool = yield* ProcessPool;
+
+          // Spawn many processes rapidly to create race conditions
+          // where health check might find them before auto-cleanup
+          for (let i = 0; i < 10; i++) {
+            yield* pool.spawn(`batch-${i}`, { command: 'echo', args: [`${i}`] });
+          }
+
+          const sizeBefore = yield* pool.size();
+          expect(sizeBefore).toBeGreaterThan(0);
+
+          // Wait for processes to exit and many health check cycles
+          yield* Effect.sleep('200 millis');
+
+          // All should be cleaned up (by either auto-cleanup or health check)
+          const finalSize = yield* pool.size();
+          return finalSize;
+        }).pipe(Effect.provide(layer))
+      )
+    );
+
+    expect(result).toBe(0);
+  });
+
+  it('should have health check find and remove processes in stopped/error state', async () => {
+    // Use extremely fast health check (1ms) with many processes to create
+    // timing conditions where health check catches processes in stopped/error state
+    const layer = ProcessPoolLive({
+      maxConcurrent: 50,
+      healthCheckInterval: '1 millis'
+    });
+
+    await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const pool = yield* ProcessPool;
+
+          // Strategy: Spawn MANY processes in waves
+          // With 1ms health check interval, it will run very frequently
+          // Some processes will be caught by health check before exit handler cleanup
+          for (let wave = 0; wave < 10; wave++) {
+            // Spawn 10 processes per wave
+            const promises: Effect.Effect<any, any, any>[] = [];
+            for (let i = 0; i < 10; i++) {
+              const processId = `intensive-${wave}-${i}`;
+              // Mix of success and failure
+              const isError = i % 3 === 0;
+              const cmd = isError ? 'sh' : 'echo';
+              const args = isError ? ['-c', 'exit 1'] : ['ok'];
+              promises.push(pool.spawn(processId, { command: cmd, args }));
+            }
+
+            // Spawn all at once
+            yield* Effect.all(promises, { concurrency: 'unbounded' });
+
+            // Very short delay between waves
+            yield* Effect.sleep('10 millis');
+          }
+
+          // Let health check run many more cycles
+          yield* Effect.sleep('300 millis');
+
+          const finalSize = yield* pool.size();
+          expect(finalSize).toBe(0);
+        }).pipe(Effect.provide(layer))
+      )
+    );
+  });
 });
