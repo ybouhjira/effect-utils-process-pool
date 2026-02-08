@@ -78,6 +78,7 @@ export const ProcessPoolLive = (config: PoolConfig): Layer.Layer<ProcessPool> =>
                 env: processConfig.env
                   ? { ...globalThis.process.env, ...processConfig.env }
                   : undefined,
+                stdio: ['pipe', 'pipe', 'pipe'],
               }
             );
 

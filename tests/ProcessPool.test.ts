@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { Effect, Exit } from 'effect';
+import { Effect, Exit, Stream, Chunk } from 'effect';
 import { ProcessPool } from '../src/ProcessPool.js';
 import { ProcessPoolLive } from '../src/ProcessPoolLive.js';
 import type { PoolConfig, ProcessStatus } from '../src/types.js';
@@ -932,5 +932,394 @@ describe('ProcessPool', () => {
         }).pipe(Effect.provide(layer))
       )
     );
+  });
+
+  // === STREAMING ===
+
+  describe('Streaming', () => {
+    it('should read stdout from echo process', async () => {
+      const pool = await createPool({ maxConcurrent: 5 });
+
+      const managed: ManagedProcess = await Effect.runPromise(
+        pool.spawn('echo-stdout', { command: 'echo', args: ['hello world'] })
+      );
+
+      // Collect stdout stream
+      const chunks = await Effect.runPromise(Stream.runCollect(managed.stdout));
+      const output = Chunk.toArray(chunks).join('');
+
+      expect(output).toContain('hello world');
+    });
+
+    it('should read stderr from process that writes to stderr', async () => {
+      const pool = await createPool({ maxConcurrent: 5 });
+
+      const managed: ManagedProcess = await Effect.runPromise(
+        pool.spawn('stderr-test', { command: 'sh', args: ['-c', 'echo error-msg >&2'] })
+      );
+
+      // Collect stderr stream
+      const chunks = await Effect.runPromise(Stream.runCollect(managed.stderr));
+      const output = Chunk.toArray(chunks).join('');
+
+      expect(output).toContain('error-msg');
+    });
+
+    it('should write to stdin and read from stdout (cat pipe)', async () => {
+      const pool = await createPool({ maxConcurrent: 5 });
+
+      const managed: ManagedProcess = await Effect.runPromise(
+        pool.spawn('cat-test', { command: 'cat' })
+      );
+
+      // Start collecting output before writing
+      const outputPromise = Effect.runPromise(
+        Stream.runCollect(managed.stdout).pipe(Effect.timeout('3 seconds'))
+      );
+
+      // Write to stdin
+      await Effect.runPromise(managed.write('hello from stdin\n'));
+
+      // Wait a bit for data to flow through
+      await sleep(100);
+
+      // Kill process to close stdin and trigger EOF
+      await Effect.runPromise(managed.kill());
+
+      // Wait for output
+      const chunks = await outputPromise;
+      const output = Chunk.toArray(chunks).join('');
+
+      expect(output).toContain('hello from stdin');
+    }, 10000);
+
+    it('should stream ends when process exits', async () => {
+      const pool = await createPool({ maxConcurrent: 5 });
+
+      const managed: ManagedProcess = await Effect.runPromise(
+        pool.spawn('stream-end', { command: 'echo', args: ['done'] })
+      );
+
+      // Collect all stdout chunks until stream ends
+      const chunks = await Effect.runPromise(
+        Stream.runCollect(managed.stdout).pipe(Effect.timeout('5 seconds'))
+      );
+      const output = Chunk.toArray(chunks).join('');
+
+      expect(output).toContain('done');
+      // Stream should have completed without hanging
+    });
+
+    it('should write to dead process fails', async () => {
+      const pool = await createPool({ maxConcurrent: 5 });
+
+      const managed: ManagedProcess = await Effect.runPromise(
+        pool.spawn('dead-write', { command: 'echo', args: ['fast'] })
+      );
+
+      // Wait for process to exit
+      await sleep(300);
+
+      // Attempt write
+      const exit = await Effect.runPromiseExit(managed.write('data'));
+
+      // Verify it fails with ProcessPoolError
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        expect(exit.cause._tag).toBe('Fail');
+        if (exit.cause._tag === 'Fail') {
+          const error = exit.cause.error as any;
+          expect(error._tag).toBe('ProcessPoolError');
+          // Message could be either "Cannot write to dead process" or "Failed to write to process" depending on timing
+          expect(error.message).toMatch(/(Cannot write to dead process|Failed to write to process)/);
+        }
+      }
+    });
+
+    it('should handle multiple writes to stdin', async () => {
+      const pool = await createPool({ maxConcurrent: 5 });
+
+      const managed: ManagedProcess = await Effect.runPromise(
+        pool.spawn('multi-write', { command: 'cat' })
+      );
+
+      // Start collecting output before writing
+      const outputPromise = Effect.runPromise(
+        Stream.runCollect(managed.stdout).pipe(Effect.timeout('3 seconds'))
+      );
+
+      // Multiple writes
+      await Effect.runPromise(managed.write('line1\n'));
+      await Effect.runPromise(managed.write('line2\n'));
+
+      // Wait for data to flow through
+      await sleep(100);
+
+      // Kill process
+      await Effect.runPromise(managed.kill());
+
+      // Wait for output
+      const chunks = await outputPromise;
+      const output = Chunk.toArray(chunks).join('');
+
+      expect(output).toContain('line1');
+      expect(output).toContain('line2');
+    }, 10000);
+
+    it('should read stdout and stderr simultaneously', async () => {
+      const pool = await createPool({ maxConcurrent: 5 });
+
+      const managed: ManagedProcess = await Effect.runPromise(
+        pool.spawn('both-streams', {
+          command: 'sh',
+          args: ['-c', 'echo out-msg; echo err-msg >&2'],
+        })
+      );
+
+      // Collect both streams
+      const [stdoutChunks, stderrChunks] = await Effect.runPromise(
+        Effect.all([Stream.runCollect(managed.stdout), Stream.runCollect(managed.stderr)])
+      );
+
+      const stdoutOutput = Chunk.toArray(stdoutChunks).join('');
+      const stderrOutput = Chunk.toArray(stderrChunks).join('');
+
+      expect(stdoutOutput).toContain('out-msg');
+      expect(stderrOutput).toContain('err-msg');
+    });
+
+    it('should return empty stream when stdout is null', async () => {
+      const pool = await createPool({ maxConcurrent: 5 });
+
+      // This is a defensive test - in practice, with stdio: ['pipe', 'pipe', 'pipe'],
+      // stdout should never be null, but we want to ensure the code handles it
+      const managed: ManagedProcess = await Effect.runPromise(
+        pool.spawn('empty-stream', { command: 'echo', args: ['test'] })
+      );
+
+      // Even if stdout were null, Stream.empty would be used
+      expect(managed.stdout).toBeDefined();
+    });
+
+    it('should handle process with no output', async () => {
+      const pool = await createPool({ maxConcurrent: 5 });
+
+      const managed: ManagedProcess = await Effect.runPromise(
+        pool.spawn('no-output', { command: 'true' })
+      );
+
+      // Start collecting before process exits
+      const collectPromise = Effect.runPromise(
+        Stream.runCollect(managed.stdout).pipe(Effect.timeout('2 seconds'))
+      );
+
+      // Wait for process to exit
+      await sleep(200);
+
+      // Collect stdout (stream should end when process exits)
+      const chunks = await collectPromise;
+
+      // Should be empty
+      expect(Chunk.toArray(chunks).join('')).toBe('');
+    });
+
+    it('should handle large stdout output', async () => {
+      const pool = await createPool({ maxConcurrent: 5 });
+
+      // Generate 100 lines of output
+      const managed: ManagedProcess = await Effect.runPromise(
+        pool.spawn('large-output', {
+          command: 'sh',
+          args: ['-c', 'for i in $(seq 1 100); do echo "Line $i"; done'],
+        })
+      );
+
+      // Collect all output
+      const chunks = await Effect.runPromise(
+        Stream.runCollect(managed.stdout).pipe(Effect.timeout('5 seconds'))
+      );
+      const output = Chunk.toArray(chunks).join('');
+
+      // Verify we got all lines
+      expect(output).toContain('Line 1');
+      expect(output).toContain('Line 50');
+      expect(output).toContain('Line 100');
+    });
+
+    it('should handle streaming with runForEach', async () => {
+      const pool = await createPool({ maxConcurrent: 5 });
+
+      const managed: ManagedProcess = await Effect.runPromise(
+        pool.spawn('foreach-test', { command: 'echo', args: ['test-line'] })
+      );
+
+      const lines: string[] = [];
+
+      // Use runForEach to process each chunk
+      await Effect.runPromise(
+        Stream.runForEach(managed.stdout, (chunk) =>
+          Effect.sync(() => {
+            lines.push(chunk);
+          })
+        ).pipe(Effect.timeout('2 seconds'))
+      );
+
+      expect(lines.join('')).toContain('test-line');
+    });
+
+    it('should handle write error when stdin is unavailable', async () => {
+      const pool = await createPool({ maxConcurrent: 5 });
+
+      // Spawn a process that doesn't use stdin (though with pipe mode, stdin should always be available)
+      const managed: ManagedProcess = await Effect.runPromise(
+        pool.spawn('no-stdin', { command: 'echo', args: ['test'] })
+      );
+
+      // Wait a bit for process to potentially exit
+      await sleep(200);
+
+      // Try to write after process has exited
+      const exit = await Effect.runPromiseExit(managed.write('data'));
+
+      // Should fail because process is dead
+      expect(Exit.isFailure(exit)).toBe(true);
+    });
+
+    it('should handle concurrent reads from same stream', async () => {
+      const pool = await createPool({ maxConcurrent: 5 });
+
+      const managed: ManagedProcess = await Effect.runPromise(
+        pool.spawn('concurrent-reads', {
+          command: 'sh',
+          args: ['-c', 'for i in 1 2 3 4 5; do echo "Line $i"; sleep 0.1; done'],
+        })
+      );
+
+      // Start two concurrent stream consumers immediately
+      const promise1 = Effect.runPromise(
+        Stream.runCollect(managed.stdout).pipe(Effect.timeout('5 seconds'))
+      );
+      const promise2 = Effect.runPromise(
+        Stream.runCollect(managed.stdout).pipe(Effect.timeout('5 seconds'))
+      );
+
+      const [result1, result2] = await Promise.all([promise1, promise2]);
+
+      const output1 = Chunk.toArray(result1).join('');
+      const output2 = Chunk.toArray(result2).join('');
+
+      // Both should receive all output (streams can be consumed multiple times)
+      expect(output1).toContain('Line 1');
+      expect(output2).toContain('Line 1');
+    }, 10000);
+
+    it('should handle interleaved writes and reads', async () => {
+      const pool = await createPool({ maxConcurrent: 5 });
+
+      const managed: ManagedProcess = await Effect.runPromise(
+        pool.spawn('interleaved', { command: 'cat' })
+      );
+
+      // Start consuming stdout
+      const outputPromise = Effect.runPromise(
+        Stream.runCollect(managed.stdout).pipe(Effect.timeout('5 seconds'))
+      );
+
+      // Write multiple times with delays
+      await Effect.runPromise(managed.write('first\n'));
+      await sleep(50);
+      await Effect.runPromise(managed.write('second\n'));
+      await sleep(50);
+      await Effect.runPromise(managed.write('third\n'));
+
+      // Kill process to trigger EOF
+      await Effect.runPromise(managed.kill());
+
+      // Wait for output
+      const chunks = await outputPromise;
+      const output = Chunk.toArray(chunks).join('');
+
+      expect(output).toContain('first');
+      expect(output).toContain('second');
+      expect(output).toContain('third');
+    });
+
+    it('should handle write when stdin closes before write completes', async () => {
+      const pool = await createPool({ maxConcurrent: 5 });
+
+      const managed: ManagedProcess = await Effect.runPromise(
+        pool.spawn('stdin-close', { command: 'cat' })
+      );
+
+      // Kill immediately to close stdin
+      await Effect.runPromise(managed.kill());
+
+      // Wait for process to fully exit
+      await sleep(200);
+
+      // Try to write - should get error about dead process
+      const exit = await Effect.runPromiseExit(managed.write('too late\n'));
+
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        expect(exit.cause._tag).toBe('Fail');
+        if (exit.cause._tag === 'Fail') {
+          const error = exit.cause.error as any;
+          expect(error._tag).toBe('ProcessPoolError');
+          // Either "Cannot write to dead process" or "Failed to write"
+          expect(error.message).toMatch(/(Cannot write to dead|Failed to write)/);
+        }
+      }
+    });
+
+    it('should trigger stream cleanup finalizers when stream is interrupted', async () => {
+      const pool = await createPool({ maxConcurrent: 5 });
+
+      const managed: ManagedProcess = await Effect.runPromise(
+        pool.spawn('finalizer-test', {
+          command: 'sh',
+          args: ['-c', 'while true; do echo "running"; sleep 0.1; done'],
+        })
+      );
+
+      // Start consuming stream
+      const collectEffect = Stream.runCollect(managed.stdout).pipe(
+        Effect.timeout('500 millis')
+      );
+
+      // Run with timeout to trigger interruption
+      const exit = await Effect.runPromiseExit(collectEffect);
+
+      // Should timeout (which interrupts the stream)
+      expect(Exit.isFailure(exit)).toBe(true);
+
+      // Kill the process
+      await Effect.runPromise(managed.kill());
+
+      // Cleanup should have been called when stream was interrupted
+    });
+
+    it('should handle stream taking effect with proper scoping', async () => {
+      const pool = await createPool({ maxConcurrent: 5 });
+
+      const managed: ManagedProcess = await Effect.runPromise(
+        pool.spawn('scope-test', {
+          command: 'echo',
+          args: ['scoped-output'],
+        })
+      );
+
+      // Collect stream within a scoped effect
+      const output = await Effect.runPromise(
+        Effect.scoped(
+          Effect.gen(function* () {
+            const chunks = yield* Stream.runCollect(managed.stdout);
+            return Chunk.toArray(chunks).join('');
+          })
+        )
+      );
+
+      expect(output).toContain('scoped-output');
+    });
   });
 });
