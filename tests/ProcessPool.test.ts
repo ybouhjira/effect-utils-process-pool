@@ -540,4 +540,91 @@ describe('ProcessPool', () => {
     // Process should still be tracked (error happened after spawn)
     // The error is emitted by the spawned process, not at spawn time
   });
+
+  // === NEW ERROR PATH TESTS ===
+
+  it('should set status to error when process emits error event', async () => {
+    const pool = await createPool({ maxConcurrent: 5 });
+
+    // Spawn invalid command
+    const managed: ManagedProcess = await Effect.runPromise(
+      pool.spawn('error-status-1', { command: 'this-command-does-not-exist-12345' })
+    );
+
+    // Wait for error event
+    await sleep(300);
+
+    // Status should be error
+    const status = managed.status();
+    expect(status).toBe('error');
+  });
+
+  it('should set status to error when process exits with non-zero code', async () => {
+    const pool = await createPool({ maxConcurrent: 5 });
+
+    const managed: ManagedProcess = await Effect.runPromise(
+      pool.spawn('exit-error-1', { command: 'sh', args: ['-c', 'exit 42'] })
+    );
+
+    // Wait for process to exit
+    await sleep(300);
+
+    // Status should be error
+    const status = managed.status();
+    expect(status).toBe('error');
+  });
+
+  it('should handle kill() on already exited process (no-op)', async () => {
+    const pool = await createPool({ maxConcurrent: 5 });
+
+    // Spawn quick process that exits immediately
+    const managed: ManagedProcess = await Effect.runPromise(
+      pool.spawn('dead-kill-1', { command: 'echo', args: ['fast'] })
+    );
+
+    // Wait for process to exit naturally
+    await sleep(300);
+
+    // Try to kill already-dead process - should succeed as no-op
+    const exit = await Effect.runPromiseExit(managed.kill());
+
+    // Should succeed (no error)
+    expect(Exit.isSuccess(exit)).toBe(true);
+  });
+
+  it('should handle interrupt() on already exited process (no-op)', async () => {
+    const pool = await createPool({ maxConcurrent: 5 });
+
+    // Spawn quick process that exits immediately
+    const managed: ManagedProcess = await Effect.runPromise(
+      pool.spawn('dead-int-1', { command: 'true' })
+    );
+
+    // Wait for process to exit naturally
+    await sleep(300);
+
+    // Try to interrupt already-dead process - should succeed as no-op
+    const exit = await Effect.runPromiseExit(managed.interrupt());
+
+    // Should succeed (no error)
+    expect(Exit.isSuccess(exit)).toBe(true);
+  });
+
+  it('should handle process exit with signal correctly', async () => {
+    const pool = await createPool({ maxConcurrent: 5 });
+
+    const managed: ManagedProcess = await Effect.runPromise(
+      pool.spawn('signal-status-1', { command: 'sleep', args: ['10'] })
+    );
+
+    // Kill with signal
+    await Effect.runPromise(managed.interrupt());
+
+    // Wait for signal handling
+    await sleep(300);
+
+    // Status should be stopped (signal-based exit)
+    const status = managed.status();
+    expect(['stopping', 'stopped']).toContain(status);
+  });
 });

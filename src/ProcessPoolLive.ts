@@ -27,38 +27,29 @@ export const ProcessPoolLive = (config: PoolConfig): Layer.Layer<ProcessPool> =>
               );
             }
 
-            try {
-              // Spawn child process
-              const child = spawn(
-                processConfig.command,
-                processConfig.args ?? [],
-                {
-                  cwd: processConfig.cwd,
-                  env: processConfig.env
-                    ? { ...globalThis.process.env, ...processConfig.env }
-                    : undefined,
-                }
-              );
+            // Spawn child process
+            const child = spawn(
+              processConfig.command,
+              processConfig.args ?? [],
+              {
+                cwd: processConfig.cwd,
+                env: processConfig.env
+                  ? { ...globalThis.process.env, ...processConfig.env }
+                  : undefined,
+              }
+            );
 
-              const managed = new ManagedProcessImpl(id, processConfig, child);
+            const managed = new ManagedProcessImpl(id, processConfig, child);
 
-              // Auto-cleanup on exit
-              child.on('exit', () => {
-                Effect.runSync(Ref.update(processes, HashMap.remove(id)));
-              });
+            // Auto-cleanup on exit
+            child.on('exit', () => {
+              Effect.runSync(Ref.update(processes, HashMap.remove(id)));
+            });
 
-              // Add to pool
-              yield* Ref.update(processes, HashMap.set(id, managed));
+            // Add to pool
+            yield* Ref.update(processes, HashMap.set(id, managed));
 
-              return managed;
-            } catch (error) {
-              return yield* Effect.fail(
-                new ProcessPoolError({
-                  message: `Failed to spawn process ${id}`,
-                  cause: error,
-                })
-              );
-            }
+            return managed;
           }),
 
         get: (id: string) =>

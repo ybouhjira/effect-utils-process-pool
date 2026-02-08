@@ -51,18 +51,10 @@ export class ManagedProcessImpl implements ManagedProcess {
   interrupt(): Effect.Effect<void, ProcessPoolError> {
     const self = this;
     return Effect.gen(function* () {
-      try {
-        if (self.childProcess.pid && !self.childProcess.killed) {
-          self.currentStatus = 'stopping';
-          self.childProcess.kill('SIGINT');
-        }
-      } catch (error) {
-        return yield* Effect.fail(
-          new ProcessPoolError({
-            message: `Failed to interrupt process ${self.id}`,
-            cause: error,
-          })
-        );
+      if (self.childProcess.pid && !self.childProcess.killed) {
+        self.currentStatus = 'stopping';
+        self.childProcess.kill('SIGINT');
+        // Note: kill() returns false if process already dead, but that's OK (no-op)
       }
     });
   }
@@ -70,18 +62,10 @@ export class ManagedProcessImpl implements ManagedProcess {
   kill(): Effect.Effect<void, ProcessPoolError> {
     const self = this;
     return Effect.gen(function* () {
-      try {
-        if (self.childProcess.pid && !self.childProcess.killed) {
-          self.currentStatus = 'stopping';
-          self.childProcess.kill('SIGTERM');
-        }
-      } catch (error) {
-        return yield* Effect.fail(
-          new ProcessPoolError({
-            message: `Failed to kill process ${self.id}`,
-            cause: error,
-          })
-        );
+      if (self.childProcess.pid && !self.childProcess.killed) {
+        self.currentStatus = 'stopping';
+        self.childProcess.kill('SIGTERM');
+        // Note: kill() returns false if process already dead, but that's OK (no-op)
       }
     });
   }
