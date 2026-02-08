@@ -18,7 +18,11 @@
       }
     }
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
@@ -30,7 +34,14 @@
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build"
   },
-  "keywords": ["effect", "process", "pool", "child-process", "lifecycle", "concurrency"],
+  "keywords": [
+    "effect",
+    "process",
+    "pool",
+    "child-process",
+    "lifecycle",
+    "concurrency"
+  ],
   "author": "Youssef Bouhjira",
   "license": "MIT",
   "repository": {
@@ -38,13 +49,14 @@
     "url": "https://github.com/ybouhjira/effect-utils-process-pool"
   },
   "peerDependencies": {
-    "effect": "^3.0.0",
     "@effect/platform": "^0.90.0",
-    "@effect/platform-node": "^0.70.0"
+    "@effect/platform-node": "^0.70.0",
+    "effect": "^3.0.0"
   },
   "devDependencies": {
     "@effect/platform": "^0.92.0",
     "@effect/platform-node": "^0.73.1",
+    "@types/node": "^25.2.2",
     "@typescript-eslint/eslint-plugin": "^8.54.0",
     "@typescript-eslint/parser": "^8.54.0",
     "@vitest/coverage-v8": "^3.0.6",
