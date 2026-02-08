@@ -56,6 +56,34 @@ describe('ProcessPool', () => {
     expect(['starting', 'running']).toContain(status);
   });
 
+  it('should allow write immediately after spawn without race condition', async () => {
+    const pool = await createPool({ maxConcurrent: 5 });
+
+    // Spawn a cat process that echoes input
+    const managed: ManagedProcess = await Effect.runPromise(
+      pool.spawn('immediate-write', { command: 'cat' })
+    );
+
+    // Start collecting output
+    const outputPromise = Effect.runPromise(
+      Stream.runCollect(managed.stdout).pipe(Effect.timeout('2 seconds'))
+    );
+
+    // Write IMMEDIATELY after spawn - should work without "Cannot write to dead process" error
+    await Effect.runPromise(managed.write('test data\n'));
+
+    // Wait a bit for data to flow
+    await sleep(50);
+
+    // Kill to close stdin
+    await Effect.runPromise(managed.kill());
+
+    // Verify output was received
+    const chunks = await outputPromise;
+    const output = Chunk.toArray(chunks).join('');
+    expect(output).toContain('test data');
+  });
+
   it('should return ManagedProcess with correct id and config', async () => {
     const pool = await createPool({ maxConcurrent: 5 });
 
@@ -527,18 +555,21 @@ describe('ProcessPool', () => {
   it('should handle invalid command spawn gracefully', async () => {
     const pool = await createPool({ maxConcurrent: 5 });
 
-    // Try to spawn a command that doesn't exist
-    const managed: ManagedProcess = await Effect.runPromise(
+    // Try to spawn a command that doesn't exist - should fail at spawn time
+    const exit = await Effect.runPromiseExit(
       pool.spawn('invalid-cmd', { command: 'this-command-does-not-exist-12345' })
     );
 
-    expect(managed).toBeDefined();
-
-    // Wait a bit for the error event
-    await sleep(200);
-
-    // Process should still be tracked (error happened after spawn)
-    // The error is emitted by the spawned process, not at spawn time
+    // Should fail with ProcessPoolError about spawn failure
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isFailure(exit)) {
+      expect(exit.cause._tag).toBe('Fail');
+      if (exit.cause._tag === 'Fail') {
+        const error = exit.cause.error as any;
+        expect(error._tag).toBe('ProcessPoolError');
+        expect(error.message).toContain('Failed to spawn process');
+      }
+    }
   });
 
   // === NEW ERROR PATH TESTS ===
@@ -546,17 +577,21 @@ describe('ProcessPool', () => {
   it('should set status to error when process emits error event', async () => {
     const pool = await createPool({ maxConcurrent: 5 });
 
-    // Spawn invalid command
-    const managed: ManagedProcess = await Effect.runPromise(
+    // Spawn invalid command - now fails at spawn time
+    const exit = await Effect.runPromiseExit(
       pool.spawn('error-status-1', { command: 'this-command-does-not-exist-12345' })
     );
 
-    // Wait for error event
-    await sleep(300);
-
-    // Status should be error
-    const status = managed.status();
-    expect(status).toBe('error');
+    // Should fail with ProcessPoolError about spawn failure
+    expect(Exit.isFailure(exit)).toBe(true);
+    if (Exit.isFailure(exit)) {
+      expect(exit.cause._tag).toBe('Fail');
+      if (exit.cause._tag === 'Fail') {
+        const error = exit.cause.error as any;
+        expect(error._tag).toBe('ProcessPoolError');
+        expect(error.message).toContain('Failed to spawn process');
+      }
+    }
   });
 
   it('should set status to error when process exits with non-zero code', async () => {

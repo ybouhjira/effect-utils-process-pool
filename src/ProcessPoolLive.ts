@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { ProcessPool } from './ProcessPool.js';
 import { ManagedProcessImpl } from './ManagedProcess.js';
 import type { PoolConfig, ProcessConfig } from './types.js';
-import { ProcessLimitError, ProcessNotFoundError } from './errors.js';
+import { ProcessPoolError, ProcessLimitError, ProcessNotFoundError } from './errors.js';
 
 export const ProcessPoolLive = (config: PoolConfig): Layer.Layer<ProcessPool> =>
   Layer.scoped(
@@ -83,6 +83,24 @@ export const ProcessPoolLive = (config: PoolConfig): Layer.Layer<ProcessPool> =>
             );
 
             const managed = new ManagedProcessImpl(id, processConfig, child);
+
+            // Wait for process to be ready before proceeding
+            yield* Effect.async<void, ProcessPoolError>((resume) => {
+              if (child.pid) {
+                // Already spawned synchronously
+                resume(Effect.succeed(undefined));
+                return;
+              }
+              child.once('spawn', () => {
+                resume(Effect.succeed(undefined));
+              });
+              child.once('error', (err) => {
+                resume(Effect.fail(new ProcessPoolError({
+                  message: `Failed to spawn process ${id}: ${err.message}`,
+                  cause: err,
+                })));
+              });
+            });
 
             // Auto-cleanup on exit
             child.on('exit', () => {
