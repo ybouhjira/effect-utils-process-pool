@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { ProcessPool } from './ProcessPool.js';
 import { ManagedProcessImpl } from './ManagedProcess.js';
 import type { PoolConfig, ProcessConfig } from './types.js';
-import { ProcessLimitError, ProcessNotFoundError, ProcessPoolError } from './errors.js';
+import { ProcessLimitError, ProcessNotFoundError } from './errors.js';
 
 export const ProcessPoolLive = (config: PoolConfig): Layer.Layer<ProcessPool> =>
   Layer.scoped(

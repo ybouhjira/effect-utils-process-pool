@@ -1072,13 +1072,13 @@ describe('ProcessPool', () => {
       const managed: ManagedProcess = await Effect.runPromise(
         pool.spawn('both-streams', {
           command: 'sh',
-          args: ['-c', 'echo out-msg; echo err-msg >&2'],
+          args: ['-c', 'sleep 0.1; echo out-msg; echo err-msg >&2; sleep 0.1'],
         })
       );
 
-      // Collect both streams
+      // Collect both streams concurrently
       const [stdoutChunks, stderrChunks] = await Effect.runPromise(
-        Effect.all([Stream.runCollect(managed.stdout), Stream.runCollect(managed.stderr)])
+        Effect.all([Stream.runCollect(managed.stdout), Stream.runCollect(managed.stderr)], { concurrency: 2 })
       );
 
       const stdoutOutput = Chunk.toArray(stdoutChunks).join('');
